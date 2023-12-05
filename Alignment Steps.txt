@@ -1,0 +1,306 @@
+This document describes how I aligned the ROSA and IBIS datasets. This process
+uses IDL because IDL already has all of the necessary tools.
+
+
+===============================================================================================================
+STEP 1: Determine Rotation Angle
+
+FOR ROSA:
+Create an averaged SAV file for each wavelength's Airforce Target Images. 
+See example SAV file in Examples/ folder: "Average.Series.GBAND.Target.11272018.sav"
+Code used: "average_target_series.pro"
+
+FOR ZYLA:
+To be able to read the binary ZYLA camera files and create averaged SAV files of the  target images, I used 
+parts of Gordon's SSOC-soft code and compiled it into its own program.
+Code used: "read_zyla.py"
+
+In order to align ROSA images with other datasets (and with other ROSA wavelengths), all the images need to 
+be facing the same direction. 
+There are rotation differences even among the ROSA channels.
+The Airforce Target image will let you know how the camera was oriented.
+ROSA wavelengths G-Band, 4170, and 3500 all should have the same rotation.
+However, Zyla and Ca K initially point in different directions from the forementioned ROSA wavelengths and 
+from one another.
+
+When aligning to IBIS, I found out that:
+
+IBIS: Rotation 7 (reference to point solar north) (270 degree counterclockwise rotation; transposed)
+G-Band: 6 (180 degree counterclockwise rotation; transposed)
+Ca K: 3 (270 degree counterclockwise rotation; no transpose)
+4170: 6 (180 degree counterclockwise rotation; transposed)
+3500: 6 (180 degree counterclockwise rotation; transposed)
+Zyla: 1 (90 degree counterclockwise rotation; no transpose)
+
+See image file in Examples/ folder: "11272018.Average.Rotated.Target.Image.Positions.png" for 
+proper initial rotations.
+
+To perform an initial rotation of the images, I use IDL's ROTATE function.
+See https://www.l3harrisgeospatial.com/docs/rotate.html.
+
+Code Snippet:
+
+ROTATE(image_array, rotation_number)
+ROTATE(gband_ims, 6)
+
+In python, the equivalent is scipy's ndimage.rotate.
+See https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.rotate.html.
+
+i.e, 
+im = scipy.ndimage.rotate(target_gband, 180).T
+
+===============================================================================================================
+STEP 2: Determine Plate Scale
+
+While the cameras usually have a target plate scale, minor variations exist and can distort the alignment process.
+So they should be accounted for.
+
+One way to determine the plate scale of the different ROSA channels is to look at each wavelength's dot grid files.
+As in STEP 1, I compiled averaged SAV files of the dot grids. See SAV file in Examples/ folder: 
+"Average.Series.GBAND.DotGrid.11272018.sav"
+Code used: "average_dot_series.pro", "read_zyla.py"
+
+
+Common target plate scales:
+ROSA: 0.06 arcsec per pixel
+Zyla: 0.083 arcsec per pixel
+IBIS: 0.097 arcsec per pixel
+
+To compute plate scales from the dot grid files, I use Kevin Reardon's IDL program "find_dot_grid_spacing.pro". 
+All the dot files should initially be rotated by the value found in STEP 1.
+This program also determines the rotation of the grid images.
+More image rotation using IDL's ROT function might need to be implemented for the program to work. 
+Program might not work if the rotation of the dot grid is greater than 0.5 degrees.
+See restrictions in "find_dot_grid_spacing.pro". 
+
+Code Snippet:
+
+Interactive IDL Code:
+
+window, 0, xsize=1004, ysize=1002
+image_scale_xy = find_dot_grid_spacing(ROT(ROTATE(gband_grid_image,6),-0.1,cubic=-0.5), /bootstrap,/verbose, /fft_spacing)
+
+Follow instructions displayed in the terminal to ensure a good alignment.
+You have to click on the dots. 
+This hurts my eyes.
+
+An example of a good dot alignment can be seen in this image file in Examples/ folder: "11272018.Dot.Grid.GBAND.example.png".
+
+Once that's finished, you would see something like this in the terminal:
+
+Average Dot Spacing:
+    x-axis:  31.065 pixel / dot
+    y-axis:  32.484 pixel / dot
+Calculated Plate Scales:
+    x-axis: 0.06052 arcsec/pixel
+    y-axis: 0.05787 arcsec/pixel
+Estimated Grid Rotation -   0.15,   0.18 deg
+     0.060518809     0.057874419
+
+I do this about 3 times and average the plate scale results to get a final plate scale number for the x and y axis.
+During these times, I also play around with the grid rotation [ ROT(ROTATE(gband_grid_image,6), # ,cubic=-0.5) ] 
+to try to get the estimate grid rotation displayed by the program to around 0.
+Sometimes, I also remove the /fft_spacing keyword to see what values I get or if does a better dot alignment.
+
+
+===============================================================================================================
+STEP 3: Remove Major Image Jitter
+
+ROSA:
+Because the adaptive optics system might lose track of its reference point, some image jitter will naturally
+ensue.
+In the quiet Sun, the AO has to lock onto variable temporal features (bright spots, pores, etc), so it might 
+lose its reference point a lot more than if it were to lock onto a sunspot.
+
+Image jitter can be removed by aligning consecutive images with the previous shifted image in the sequence
+using a basic cross-correlation method to compute the shifts.
+
+See this code as an example: "align.zyla.11272018.pro"
+Program needs the following IDL codes: xyoff.pro, shift_frac.pro
+
+Sometimes, consecutive bad speckle reconstructed or really blurry images will mess up the alignment process.
+There has to be a better way of doing this, but this is what I did.
+In this case, I had to manually re-adjust those images by selecting a different reference image for them or
+by changing the cross-correlation box size.
+The "xyoff.pro" program performs cross-correlation on the center of the image, so for a really blurry image
+a smaller cross-correlation box size might be needed.
+The smaller the box size, the slower the code runs.
+
+For the high cadence ROSA data, I chose the last known non-blurry/good frame before the sequence of bad frames.
+Another technique would be to average the previous two images that were already shifted and perform the alignment.
+
+See this code as an example: "align.caK.11102017.pro".
+
+To scroll through or view a movie of the aligned cube, use:
+xmovie, image_array
+
+or load the FITs file in DS9.
+
+
+===============================================================================================================
+STEP 4: Align datasets (ROSA and IBIS)
+
+Assuming the IBIS datasets are all aligned in time, we can align the nearest in time ROSA and IBIS images.
+Even if all the instruments were running simultaneously, they are different instruments, so there will be
+rotation differences between them.
+
+This portion of the alignment process involves several different steps:
+1. Applying the proper plate scale corrections and rotations to the ROSA images
+2. Rebinning one of the datasets to match the other in order to perform the cross-correlation
+3. Finding the angle between the ROSA and IBIS images
+
+Apply the proper plate scale corrections and rotations using the values found in STEP 1 and 2:
+
+Code Snippet:
+
+data_dir = '/boomerang-data/ovesa/swirls_data/11272018/'
+rsci = readfits(data_dir + '11272018.ROSA.GBAND.aligned.fits',exten=0,nslice=23)
+rsci = ROTATE(rsci, 6)
+
+gband_plate_scale = [0.0605,0.0578]
+target_scale = 0.06
+rosa_size = size(rsci)
+px = ROUND(rosa_size[1]*gband_plate_scale[0]/target_scale)
+py = ROUND(rosa_size[2]*gband_plate_scale[1]/target_scale)
+ROSA_scaled_im = CONGRID(rsci, px, py, CUBIC=-0.5)
+
+
+Rebin the IBIS dataset to match ROSA's plate scale in order to perform the alignment:
+
+Code Snippet:
+
+restore, '/home/users/ovesa/Swirl_dataset/IBIS2/8542_nb014.sav', /verbose
+ribis =  (NBDATA[*,*,2]) ;already had intial rotation done ROTATE(IBIS, 7)
+
+im_size = size(ribis)
+im_ibis_pix = ROUND(im_size[1:2] * 0.097 / 0.06)
+IBIS_scaled_im  = CONGRID(ribis, im_ibis_pix[0], im_ibis_pix[1], CUBIC=-0.5)
+
+
+Create same size array for the ROSA image and place it in the middle:
+
+scaled_IBIS_size = size(IBIS_scaled_im, /dim)
+ROSA_seq = FLTARR(scaled_IBIS_size[0],scaled_IBIS_size[1],/NOZERO)
+ROSA_seq[*,*] = avg(ROSA_scaled_im)
+
+ROSA_size = size(ROSA_scaled_im, /dim)
+x0 = (scaled_IBIS_size[0] - ROSA_size[0])/2
+y0 = (scaled_IBIS_size[1] - ROSA_size[1])/2
+
+; this might change since the above code doesn't handle odd numbers well
+ROSA_seq[x0:scaled_IBIS_size[0]-x0-2,y0:scaled_IBIS_size[1]-y0-2] = ROSA_scaled_im
+
+
+
+To determine the angle between the ROSA and IBIS images, I use SolarSoft's "auto_align_images.pro" 
+(https://sohoftp.nascom.nasa.gov/solarsoft/gen/idl/image/auto_align_images.pro).
+
+This code would take forever if you were to apply it to all your images, so I only use it to determine what value 
+I need to rotate ROSA to match it to IBIS.
+
+I assume that the rotation angle for a dataset doesn't change a lot during the observation, so I only do this process 
+for one ROSA image and its corresponding nearest in time IBIS image.
+However, one can check this by repeating this process for x number of images.
+
+This code creates an interactive window that allows you to click on regions of interest/feature match between ROSA and
+IBIS.
+ROSA_seq is the image that you want to align. Seen on the left.
+IBIS_scaled_im is the reference. Seen on the right.
+Computes some complex algorithm to align images really well.
+CON: slow. PRO: very accurate.
+ 
+
+Code Snippet:
+
+Setpts,pp,ROSA_seq,IBIS_scaled_im
+tt = caltrans(pp)
+	
+pin = tt[*,0]
+qin = tt[*,1] 
+
+inew = auto_align_images(ROSA_seq,IBIS_scaled_im,pin,qin,pout,qout,scale=1,/quiet)
+pq2rss,pout,qout,erot,exscl,eyscl,exshft,eyshft, /rotfirst
+
+The terminal will display something like this:
+   rotation =  0.475846 degrees
+   scale x =  1.00275
+   scale y =  1.00496
+   shift x =  -33.1535
+   shift y =  28.5426
+
+This code can provide you with the rotation angle, plate scale in the x and y direction, and shifts.
+
+
+See the following images in Examples/ folder for an overview: "auto_align_images_step1.png", "auto_align_images_step2.png",
+"auto_align_images_step3.png".
+
+NOTE: The rotation angle this program computes is defined as postive for counterclockwise and negative for clockwise.
+On the other hand, IDL's ROT function (https://www.l3harrisgeospatial.com/docs/rot.html) rotates an image clockwise.
+So, in this example, the program calculated a rotation angle of 0.475 degrees counterclockwise. 
+This means that we need to multiply this rotation angle by -1 in order to get the proper rotation using IDL's 
+ROT function.
+
+After calculating the rotation angle needed to match ROSA to IBIS and checking to make sure that the images 
+are actually aligned well (see STEP 4.5 below), I use a code like
+"align.rosa.to.ibis.pro" to compute shifts and "apply.shifts.to.rosa.pro" to create a new FITS file
+with all of the proper rotations, shifts, and plate scale corrections applied.
+
+ROSA's G-Band and Ca K were aligned with a Calcium NB line scan.
+Zyla was aligned with a H-alpha NB line scan.
+ROSA's 4170 was aligned to G-Band, which was already aligned to IBIS.
+For that, I use "align.rosa.to.rosa.11272018.pro".
+
+Minor image shifts might appear in the final result depending on the IBIS alignment. 
+One might apply another simple cross-correlation code like in STEP 3 to fix those shifts......
+
+
+===============================================================================================================
+STEP 4.5 Check alignment
+
+Alignment can be checked prior to applying transformations to the image sequences using SolarSoft's map function.
+
+To check if the rotation angle computed by "auto_align_images.pro" is correct, apply all of the computed 
+transformations (plate scale, rotations) onto one ROSA image beforehand.
+Then compute the shifts between the image and a corresponding IBIS image and apply those shifts.
+Then, use the code below to check if the images are aligned.
+
+Code snippet:
+
+; FOR ROSA ;
+
+dxv = 0.06; pixel scale in x
+dyv = 0.06; pixel scale in y
+xcv = 0.175 ; solar longitude
+ycv =  0.0369; solar latitude
+timev = '27-November-2018 16:59:29.57'
+
+map_rosa = make_map(rsci, dx=dxv, dy=dyv, xc=xcv, yc=ycv, time=timev, units='arcsecs')
+
+; FOR IBIS ;
+
+dxv = 0.097 ; pixel scale in x
+dyv = 0.097 ; pixel scale in y
+xcv = 0.175 ; solar longitude
+ycv =  0.0369; solar latitude
+timev = '27-November-2018 16:59:29.57'
+
+map_ibis = make_map(ribis, dx=dxv, dy=dyv, xc=xcv, yc=ycv, time=timev,units='arcsecs')
+gmap=respace_map(map_ibis, 0.06, 0.06) ; resize IBIS map to ROSA scale
+
+
+To view what part of IBIS the ROSA field of view covers, use:
+
+window,0
+plot_map, map_ibis, fov=map_rosa
+
+To blink between two maps to check for alignment, use:
+
+window,0
+blink_map, map_rosa, map_ibis
+
+blink_map, map_rosa, gmap
+
+See gif in Examples/ folder: "11272018.IBISHA002.ZYLA22.gif"
+===============================================================================================================
+
+
